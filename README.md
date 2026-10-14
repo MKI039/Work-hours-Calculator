@@ -76,11 +76,3 @@ Any recent browser. Reading `.xlsx` files needs Chrome 80+, Safari 16.4+ or Fire
 index.html   the whole app (HTML, CSS and JavaScript in one file)
 README.md    this file
 ```
-
-## Run on GitHub Pages
-
-1. Create a new **public** repository on GitHub.
-2. Upload `index.html` (and `README.md`) to the root: **Add file → Upload files → Commit changes**.
-3. Open **Settings → Pages**. Under **Build and deployment**, set **Source** to **Deploy from a branch**, choose **main** and **/ (root)**, then **Save**.
-4. Wait a minute or two. Your app is live at `https://<your-username>.github.io/<repository-name>/`.
-5. Optional on a phone: open the link and use **Add to Home Screen**.
