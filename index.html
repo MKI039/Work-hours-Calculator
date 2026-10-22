@@ -150,8 +150,8 @@ button,input{touch-action:manipulation}
   </section>
 
   <section class="card">
-    <h2>Biometric report (.xlsx)</h2>
-    <div class="bk"><button class="primary" id="rimp">Import report</button><input type="file" id="rfile" accept=".xlsx" hidden></div>
+    <h2>Biometric report (.xlsx or .pdf)</h2>
+    <div class="bk"><button class="primary" id="rimp">Import report</button><input type="file" id="rfile" accept=".xlsx,.pdf" hidden></div>
     <p class="note" id="rmsg" role="status">Reads the company biometric sheet. The file itself isn't stored, only the days from it.</p>
     <div id="implist"></div>
     <p class="note" id="impempty">No imported reports.</p>
@@ -438,8 +438,8 @@ button,input{touch-action:manipulation}
     all.forEach(function(x){ if(x.date>cutoff) out.future++; else if(x.pending) out.pending++; else out.entries.push(x); });
     return out;
   }
-  async function inflate(u8, cap){
-    var rd = new ReadableStream({start:function(c){ c.enqueue(u8); c.close(); }}).pipeThrough(new DecompressionStream("deflate-raw")).getReader(), parts = [], n = 0;
+  async function inflate(u8, cap, fmt){
+    var rd = new ReadableStream({start:function(c){ c.enqueue(u8); c.close(); }}).pipeThrough(new DecompressionStream(fmt || "deflate-raw")).getReader(), parts = [], n = 0;
     for(;;){ var r = await rd.read(); if(r.done) break; n += r.value.length; if(n>cap){ rd.cancel(); throw new Error("big"); } parts.push(r.value); }
     var out = new Uint8Array(n), o = 0; parts.forEach(function(p){ out.set(p,o); o += p.length; }); return out;
   }
@@ -489,6 +489,143 @@ button,input{touch-action:manipulation}
     var out = []; for(var i=0;i<rows.length;i++){ var a = []; for(var j=0;j<w;j++) a.push(rows[i] && rows[i][j]!=null ? String(rows[i][j]) : ""); out.push(a); }
     return out;
   }
+  function bstr(u8){ var o = ""; for(var i=0;i<u8.length;i+=8192) o += String.fromCharCode.apply(null, u8.subarray(i,i+8192)); return o; }
+  function mulM(a,b){ return [a[0]*b[0]+a[1]*b[2], a[0]*b[1]+a[1]*b[3], a[2]*b[0]+a[3]*b[2], a[2]*b[1]+a[3]*b[3], a[4]*b[0]+a[5]*b[2]+b[4], a[4]*b[1]+a[5]*b[3]+b[5]]; }
+  function hexBytes(h){ h = h.replace(/\s+/g,""); if(h.length%2) h += "0"; var o = ""; for(var i=0;i<h.length;i+=2) o += String.fromCharCode(parseInt(h.substr(i,2),16)); return o; }
+  function u16(h){ var o = ""; for(var i=0;i+4<=h.length;i+=4) o += String.fromCharCode(parseInt(h.substr(i,4),16)); return o; }
+  function parseCmap(t){
+    var map = {};
+    t.replace(/beginbfchar([\s\S]*?)endbfchar/g, function(_,b){ b.replace(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g, function(_,a,c){ map[parseInt(a,16)] = u16(c); return ""; }); return ""; });
+    t.replace(/beginbfrange([\s\S]*?)endbfrange/g, function(_,b){
+      b.replace(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(?:<([0-9A-Fa-f]+)>|\[([^\]]*)\])/g, function(_,lo,hi,dst,arr){
+        lo = parseInt(lo,16); hi = parseInt(hi,16); if(hi<lo || hi-lo>65535) return "";
+        if(dst){ var d = u16(dst), last = d.charCodeAt(d.length-1); for(var k=0;k<=hi-lo;k++) map[lo+k] = d.slice(0,-1)+String.fromCharCode(last+k); }
+        else { var els = arr.match(/<[0-9A-Fa-f]+>/g) || []; for(var q=0;q<=hi-lo && q<els.length;q++) map[lo+q] = u16(els[q].slice(1,-1)); }
+        return "";
+      }); return ""; });
+    return map;
+  }
+  function textItems(c, fonts, out){
+    var i = 0, n = c.length, st = [], ctm = [1,0,0,1,0,0], stack = [], tm = [1,0,0,1,0,0], tlm = tm, lead = 0, font = null, ops = 0;
+    var ws = " \t\r\n\f\0", dl = "()<>[]{}/%";
+    function dec(s){
+      if(!font) return s;
+      var o = "", k;
+      if(font.two){ for(k=0;k+1<s.length;k+=2){ var cd = (s.charCodeAt(k)<<8)|s.charCodeAt(k+1); if(font.map[cd]!==undefined) o += font.map[cd]; } }
+      else for(k=0;k<s.length;k++){ var b = s.charCodeAt(k); o += font.map[b]!==undefined ? font.map[b] : String.fromCharCode(b); }
+      return o;
+    }
+    function emit(t){ if(!t) return; var p = mulM(tm, ctm); out.push({x:p[4], y:p[5], t:t}); }
+    function next(){ tlm = mulM([1,0,0,1,0,-lead], tlm); tm = tlm.slice(); }
+    while(i<n && ops++ < 400000){
+      var ch = c.charAt(i), j;
+      if(ws.indexOf(ch)>=0){ i++; continue; }
+      if(ch==="%"){ while(i<n && c.charAt(i)!=="\n" && c.charAt(i)!=="\r") i++; continue; }
+      if(ch==="("){
+        var depth = 1, str = ""; i++;
+        while(i<n && depth>0){
+          var q = c.charAt(i++);
+          if(q==="\\"){
+            var e = c.charAt(i++);
+            if(e==="n") str += "\n"; else if(e==="r") str += "\r"; else if(e==="t") str += "\t"; else if(e==="b") str += "\b"; else if(e==="f") str += "\f";
+            else if(/[0-7]/.test(e)){ var oc = e; while(oc.length<3 && /[0-7]/.test(c.charAt(i))) oc += c.charAt(i++); str += String.fromCharCode(parseInt(oc,8)&255); }
+            else if(e!=="\n" && e!=="\r") str += e;
+          } else if(q==="("){ depth++; str += q; } else if(q===")"){ depth--; if(depth>0) str += q; } else str += q;
+        }
+        st.push({s:str}); continue;
+      }
+      if(ch==="<" && c.charAt(i+1)==="<"){ var d2 = 1; i += 2; while(i<n && d2>0){ if(c.substr(i,2)==="<<"){ d2++; i += 2; } else if(c.substr(i,2)===">>"){ d2--; i += 2; } else i++; } st.push(null); continue; }
+      if(ch==="<"){ var e2 = c.indexOf(">", i); if(e2<0) break; st.push({s:hexBytes(c.slice(i+1,e2))}); i = e2+1; continue; }
+      if(ch==="["){ st.push({m:1}); i++; continue; }
+      if(ch==="]"){ var arr = []; while(st.length && !(st[st.length-1] && st[st.length-1].m)) arr.unshift(st.pop()); st.pop(); st.push({a:arr}); i++; continue; }
+      if(ch==="/"){ j = i+1; while(j<n && ws.indexOf(c.charAt(j))<0 && dl.indexOf(c.charAt(j))<0) j++; st.push({n:c.slice(i+1,j)}); i = j; continue; }
+      if(")>}{".indexOf(ch)>=0){ i++; continue; }
+      j = i; while(j<n && ws.indexOf(c.charAt(j))<0 && dl.indexOf(c.charAt(j))<0) j++;
+      var tok = c.slice(i,j); i = j;
+      if(/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)){ st.push(+tok); continue; }
+      var a = st, L = a.length, last = a[L-1];
+      if(tok==="q") stack.push(ctm.slice());
+      else if(tok==="Q"){ if(stack.length) ctm = stack.pop(); }
+      else if(tok==="cm"){ if(L>=6) ctm = mulM(a.slice(-6), ctm); }
+      else if(tok==="BT"){ tm = [1,0,0,1,0,0]; tlm = tm; }
+      else if(tok==="Tf"){ font = (L>=2 && a[L-2] && a[L-2].n && fonts[a[L-2].n]) || null; }
+      else if(tok==="Tm"){ if(L>=6){ tm = a.slice(-6); tlm = tm.slice(); } }
+      else if(tok==="Td" || tok==="TD"){ if(tok==="TD") lead = -(+a[L-1]||0); tlm = mulM([1,0,0,1,+a[L-2]||0,+a[L-1]||0], tlm); tm = tlm.slice(); }
+      else if(tok==="T*") next();
+      else if(tok==="TL") lead = +last||0;
+      else if(tok==="Tj") emit(dec(last && last.s || ""));
+      else if(tok==="'" || tok==="\""){ next(); emit(dec(last && last.s || "")); }
+      else if(tok==="TJ"){
+        var t = ""; ((last && last.a) || []).forEach(function(x){ if(x && x.s!==undefined) t += dec(x.s); else if(typeof x==="number" && x<-300) t += " "; });
+        emit(t);
+      }
+      else if(tok==="BI"){ var ei = c.indexOf("EI", i); i = ei<0 ? n : ei+2; }
+      st = [];
+    }
+  }
+  async function readPdfLines(buf){
+    var u = new Uint8Array(buf), s = bstr(u);
+    if(/\/Encrypt\b/.test(s.slice(-2048))) throw new Error("enc");
+    var objs = {}, re = /(\d+)\s+\d+\s+obj\b/g, m, guard = 0;
+    while((m = re.exec(s)) && guard++ < 6000){
+      var st = re.lastIndex, si = s.indexOf("stream", st), ei = s.indexOf("endobj", st);
+      if(ei<0) break;
+      if(si>=0 && si<ei){
+        var ds = si+6; if(s.charAt(ds)==="\r") ds++; if(s.charAt(ds)==="\n") ds++;
+        var d = s.slice(st,si), lm = /\/Length\s+(\d+)\b(?!\s+\d+\s+R)/.exec(d), end = lm ? ds+(+lm[1]) : s.indexOf("endstream", ds);
+        if(end<ds || end>u.length) end = ei;
+        objs[+m[1]] = {d:d, data:u.subarray(ds,end)}; re.lastIndex = end;
+      } else { objs[+m[1]] = {d:s.slice(st,ei), data:null}; re.lastIndex = ei; }
+    }
+    async function sd(o){
+      if(!o || !o.data) return "";
+      var f = /\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(o.d);
+      if(f && f[1].replace(/[\s\[\]]/g,"")!=="/FlateDecode") throw new Error("filter");
+      return bstr(f ? await inflate(o.data, 20e6, "deflate") : o.data);
+    }
+    var cache = {};
+    async function fontInfo(n){
+      if(cache[n]) return cache[n];
+      var o = objs[n], tu = o && /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(o.d);
+      return cache[n] = {two: !!(o && /\/Identity-H/.test(o.d)), map: tu ? parseCmap(await sd(objs[+tu[1]])) : {}};
+    }
+    var cat = Object.keys(objs).filter(function(k){ return /\/Type\s*\/Catalog/.test(objs[k].d); })[0], pr = cat && /\/Pages\s+(\d+)\s+\d+\s+R/.exec(objs[cat].d), pages = [];
+    (function walk(nn, dep){
+      var o = objs[nn]; if(!o || dep>20 || pages.length>50) return;
+      if(/\/Type\s*\/Pages\b/.test(o.d)){ var k = /\/Kids\s*\[([^\]]*)\]/.exec(o.d), r2 = /(\d+)\s+\d+\s+R/g, x; if(k) while((x = r2.exec(k[1]))) walk(+x[1], dep+1); }
+      else pages.push(nn);
+    })(pr ? +pr[1] : 0, 0);
+    var lines = [];
+    for(var pi=0; pi<pages.length; pi++){
+      var pd = objs[pages[pi]].d, rr = /\/Resources\s+(\d+)\s+\d+\s+R/.exec(pd), res = rr && objs[+rr[1]] ? objs[+rr[1]].d : pd;
+      var fd = /\/Font\s*<<([^>]*)>>/.exec(res), fonts = {};
+      if(!fd){ var fr = /\/Font\s+(\d+)\s+\d+\s+R/.exec(res); fd = fr && objs[+fr[1]] ? [0, objs[+fr[1]].d] : null; }
+      if(fd){ var fx = /\/([^\s\/<>\[\]()]+)\s+(\d+)\s+\d+\s+R/g, y; while((y = fx.exec(fd[1]))) fonts[y[1]] = await fontInfo(+y[2]); }
+      var cm = /\/Contents\s*\[([^\]]*)\]/.exec(pd), ids = [];
+      if(cm){ var cx = /(\d+)\s+\d+\s+R/g, z; while((z = cx.exec(cm[1]))) ids.push(+z[1]); }
+      else { var c1 = /\/Contents\s+(\d+)\s+\d+\s+R/.exec(pd); if(c1) ids.push(+c1[1]); }
+      var txt = ""; for(var q=0;q<ids.length;q++) txt += (await sd(objs[ids[q]])) + "\n";
+      var items = []; textItems(txt, fonts, items);
+      items.sort(function(a,b){ return b.y-a.y || a.x-b.x; });
+      var cur = null;
+      items.forEach(function(it){ if(!cur || Math.abs(it.y-cur.y)>3){ cur = {y:it.y, its:[]}; lines.push(cur); } cur.its.push(it); });
+    }
+    return lines.map(function(l){ return l.its.sort(function(a,b){ return a.x-b.x; }).map(function(it){ return it.t; }).join(" ").replace(/\s+/g," ").trim(); });
+  }
+  function pdfRows(lines){
+    var title = "", rows = [[], ["Date","Start Time(HH:MM)","End Time(HH:MM)","Total Hours(HH:MM)","In Time(HH:MM)","Out Time(HH:MM)","Worked Hours(HH:MM)","Permissions","Status"]];
+    lines.slice(0,3000).forEach(function(l){
+      l = l.replace(/(\w)-\s+(?=\w)/g, "$1-");
+      if(!title && /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\W+\d{4}/i.test(l) && /report/i.test(l)) title = l;
+      var m = /^(\d{1,2}-[A-Za-z]{3})\b\s*(.*)$/.exec(l); if(!m) return;
+      var tk = m[2].split(/\s+/).filter(Boolean), tms = tk.filter(function(x){ return /^\d{1,2}:\d{2}$/.test(x); }), rest = tk.filter(function(x){ return !/^\d{1,2}:\d{2}$/.test(x); });
+      var n = tms.length, inT = "", outT = "";
+      if(n>=6){ inT = tms[n-3]; outT = tms[n-2]; } else if(n===5){ inT = outT = tms[3]; }
+      rows.push([m[1], "", "", "", inT, outT, n ? tms[n-1] : "", "", rest.length ? rest[rest.length-1] : ""]);
+    });
+    rows[0] = [title];
+    return rows;
+  }
   function applyReport(p, name){
     if(p.error){ msgI(p.error); return; }
     if(!p.entries.length){ msgI("No completed days found in that file."); return; }
@@ -511,11 +648,13 @@ button,input{touch-action:manipulation}
     var f = $("rfile").files[0]; if(!f) return;
     $("rfile").value = "";
     if(f.size>5*1024*1024){ msgI("That file is too large for a clock-in report."); return; }
-    if(typeof DecompressionStream==="undefined"){ msgI("This browser can't open Excel files. Please update it."); return; }
+    if(typeof DecompressionStream==="undefined"){ msgI("This browser can't open these files. Please update it."); return; }
     var r = new FileReader();
     r.onload = async function(){
-      try{ applyReport(parseReport(await readXlsx(r.result)), f.name); }
-      catch(e){ msgI("Couldn't read that file. Please use the .xlsx biometric report."); }
+      try{
+        var b = new Uint8Array(r.result), isPdf = b[0]===0x25 && b[1]===0x50 && b[2]===0x44 && b[3]===0x46;
+        applyReport(parseReport(isPdf ? pdfRows(await readPdfLines(r.result)) : await readXlsx(r.result)), f.name);
+      }catch(e){ msgI("Couldn't read that file. Please use the .xlsx or .pdf biometric report."); }
     };
     r.onerror = function(){ msgI("Couldn't read that file."); };
     r.readAsArrayBuffer(f);
